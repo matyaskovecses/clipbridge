@@ -8,7 +8,8 @@ Apple's Universal Clipboard only works between Apple devices. If your computer r
 
 ## What it does
 
-- **Text** copied on the PC can be pasted on the iPhone, and text copied on the iPhone can be pasted on the PC.
+- **Text** copied on the PC can be pasted on the iPhone, and text copied on the iPhone can be pasted on the PC. Whatever you copied last, on either device, is what you paste.
+- **Links and formatted text**: a link copied on the iPhone arrives on the PC as the link. Text copied with formatting (from Notes or Mail, for example) keeps it when you paste into Word or Outlook.
 - **Pictures**: screenshots and copied images go from the PC to the iPhone. Photos from the iPhone land on the PC clipboard, ready to paste.
 - **Files**: share photos, PDFs or any other file from the iPhone. They're saved in `Downloads\From iPhone` and put on the PC clipboard, so Ctrl+V pastes them into a folder, a chat app or an email. Files copied in Explorer can go to the iPhone too; several at once arrive as one `.zip`.
 - **Quiet**: it lives as a small clipboard icon next to the clock and starts with Windows. There's no window to keep open.
@@ -58,14 +59,34 @@ In the **Get Contents of URL** action, tap the small arrow (or **Show More**) to
 
 ### 2. "Send to PC": put the iPhone clipboard on the PC
 
+This shortcut checks what you copied. Text and links are sent as text; everything else (photos, screenshots, formatted text, files) is sent as a file.
+
 1. Make a new shortcut named **Send to PC**.
 2. Add the action **Get Clipboard**.
-3. Add **Get Contents of URL**:
-   - URL: your URL (without `&new=1`): `http://192.168.1.23:8765/clip?t=k7m2p9x4q8r3t6w5`
-   - Method: **POST**
-   - Request Body: **File**, then tap **File** and choose **Clipboard**.
+3. Add the action **Get Type**. It should say *Get type of **Clipboard***.
+4. Add the action **If** and set it to: If **Type** **is** `Text`. Tap **Add Condition** and set the new line to **Type** **is** `URL`. Then change **All** to **Any** at the top, so the If is true for either one.
+5. Between **If** and **Otherwise**, add these two actions:
+   - **Text**, with the **Clipboard** variable inserted into it. This turns a link into its address.
+   - **Get Contents of URL**, with your URL (without `&new=1`): `http://192.168.1.23:8765/clip?t=k7m2p9x4q8r3t6w5`. Set **Method** to **POST** and **Request Body** to **File**, and choose **Text** as the file.
+6. Between **Otherwise** and **End If**, add **Get Contents of URL** again, with the same URL and **POST**. Set **Request Body** to **File**, and choose **Clipboard** as the file.
 
-Text becomes the PC clipboard. A picture is saved in `Downloads\From iPhone` and put on the PC clipboard.
+The finished shortcut looks like this:
+
+```
+Get Clipboard
+Get Type of Clipboard
+If  Any:  Type is Text
+          Type is URL
+    Text: [Clipboard]
+    Get Contents of URL   POST  .../clip?t=TOKEN   Request Body: File = Text
+Otherwise
+    Get Contents of URL   POST  .../clip?t=TOKEN   Request Body: File = Clipboard
+End If
+```
+
+Text and links become the PC clipboard. Formatted text keeps its formatting. A picture is saved in `Downloads\From iPhone` and put on the PC clipboard.
+
+Why the check matters: when a link is sent as a file, Shortcuts downloads the web page behind it and sends the whole page instead of the link. If that happens anyway, ClipBridge pastes the page's address, as long as the page states it (most do).
 
 ### 3. "File to PC": share photos and files from any app
 
@@ -86,9 +107,11 @@ iOS doesn't let any app read or watch the clipboard in the background, so a live
 
 1. In Shortcuts, go to the **Automation** tab and tap **+** (**New Automation**), then **App**.
 2. Tap **Choose** and pick the apps you copy and paste in, such as Messages, Notes, Safari, Mail and WhatsApp. Select **Is Opened** only, then choose **Run Immediately**. Tap **Next** and pick **PC Paste**.
-3. Make a second automation the same way, but with **Is Closed** only and **Run Immediately**. Choose **New Blank Automation** and add two actions: **Run Shortcut: PC Paste**, then **Run Shortcut: Send to PC**.
+3. Make a second automation the same way, but with **Is Closed** only and **Run Immediately**. Choose **New Blank Automation** and add two actions, in this order: **Run Shortcut: Send to PC**, then **Run Shortcut: PC Paste**.
 
-Opening one of those apps now brings over whatever you copied on the PC. Leaving the app first checks the PC, then sends what you copied on the iPhone. If the phone would only send back what it just got, ClipBridge recognizes it and ignores it.
+Opening one of those apps now brings over whatever you copied on the PC. Leaving the app sends what you copied on the iPhone, then picks up anything newer from the PC. The most recent copy wins: if nothing new was copied on the iPhone, ClipBridge ignores what it sends, so an old copy never replaces a newer one from the PC.
+
+> **Important:** the PC Paste URL must end in `&new=1`. Without it, PC Paste brings the PC clipboard over every time an app opens, even when nothing new was copied, and replaces what you copied on the iPhone. ClipBridge's log warns about this.
 
 You can turn off **Notify When Run** in each automation if the banners bother you.
 
@@ -143,6 +166,10 @@ Point at the icon to see the PC's address and the time of the last transfer. A *
 
 **The shortcut says "bad token"**: the token in the URL doesn't match. Click **Copy iPhone URL** again and update the URL in your Shortcuts.
 
+**What I copied on the iPhone doesn't arrive, or the PC's clipboard keeps coming back**: check that the PC Paste URL ends in `&new=1` (see the note in [step 4](#4-automations-make-it-as-automatic-as-possible)), and that the "Is Closed" automation runs **Send to PC** before **PC Paste**. **Show log** tells you when the iPhone asked without `&new=1`, and when it sent something that wasn't new.
+
+**A copied link pastes as a web page's code, or arrives as an `.html` file**: your Send to PC shortcut sends links as files, so Shortcuts downloads the page. Update it as described in [step 2](#2-send-to-pc-put-the-iphone-clipboard-on-the-pc). Until then, ClipBridge pastes the page's address whenever the page states it, and saves the page as an `.html` file when it doesn't.
+
 **The icon is a yellow warning sign**: port 8765 is used by another program, or Windows reserved it (Hyper-V and WSL sometimes do). ClipBridge retries every 15 seconds, so restarting the PC often fixes it. To use a different port, open the ClipBridge folder in Explorer, click the address bar, type `cmd` and press Enter. Then run `Install_ClipBridge.bat -Port 8766` and change `8765` to `8766` in your Shortcuts.
 
 **Photos arrive as `.heic` files that Windows can't open**: iPhones save photos as HEIC by default. You can:
@@ -152,7 +179,7 @@ Point at the icon to see the PC's address and the time of the last transfer. A *
 
 **The iPhone keeps asking "Allow Paste"**: iOS asks before a shortcut reads the clipboard. Open **Settings → Apps → Shortcuts** (on older iOS: **Settings → Shortcuts**) and set **Paste from Other Apps** to **Allow**.
 
-**Where is the log?** Click the tray icon and choose **Show log**, or paste `%LOCALAPPDATA%\ClipBridge\clipbridge.log` into Explorer's address bar. The log lists transfers and errors, with file names and text lengths but never the text itself. It's kept to about 1 MB.
+**Where is the log?** Click the tray icon and choose **Show log**, or paste `%LOCALAPPDATA%\ClipBridge\clipbridge.log` into Explorer's address bar. The log lists transfers and errors, with file names, text lengths and the website of copied links, but never the text itself. It's kept to about 1 MB.
 
 ## Limitations
 
@@ -160,6 +187,7 @@ Point at the icon to see the PC's address and the time of the last transfer. A *
 - **Both devices must be on the same network.**
 - **The PC must be on, awake and signed in.** ClipBridge runs in your Windows session and can't wake a sleeping PC.
 - **One item at a time.** It moves the current clipboard; there's no clipboard history.
+- If you copy something on both devices before they sync, the iPhone's copy wins when you leave the app.
 - Pictures from the PC arrive as PNG files; several files or a folder arrive as one `.zip`.
 - Plain HTTP, without encryption (see [Security](#security)).
 - One transfer at a time: while a big file is on its way, other requests wait.
@@ -184,12 +212,12 @@ The token goes in the query string (`?t=TOKEN`) or in an `X-Token` header. The d
 | Request | What it does |
 |---|---|
 | `GET /clip?t=TOKEN` | Returns the PC clipboard: text as `text/plain; charset=utf-8`, a picture as PNG, one copied file as it is, or several files or a folder as a `.zip`. Files come with a `Content-Disposition` file name. An empty clipboard gives an empty reply. |
-| `GET /clip?t=TOKEN&new=1` | The same, but an empty reply if nothing was copied on the PC since the phone last received or sent something. |
-| `POST /clip?t=TOKEN` | A text body (UTF-8) becomes the PC clipboard. Anything else, such as a picture or a PDF, is saved like `/file`. |
+| `GET /clip?t=TOKEN&new=1` | The same, but an empty reply if nothing was copied on the PC since the phone last received or sent something, or if the PC clipboard holds exactly what the phone already has. |
+| `POST /clip?t=TOKEN` | A text body (UTF-8) becomes the PC clipboard. RTF or Apple's flat RTFD becomes formatted text (RTF plus plain text). A whole HTML page (sent by Shortcuts in place of a copied link) becomes the page's address, taken from its `canonical` or `og:url` tag. Anything else, such as a picture or a PDF, is saved like `/file`. |
 | `POST /file?t=TOKEN` | The body is a file, with an optional `X-Filename: name` header (or `?name=`). It's saved to `Downloads\From iPhone` and put on the PC clipboard. |
 
-- Replies to POST are `ok`, or `same` if the content matches something transferred recently (the last 30 transfers, in either direction) and was ignored. `PUT` works like `POST`.
-- A body counts as text if it has no file name, doesn't start like a known file type (JPEG, PNG, GIF, PDF, ZIP, HEIC, MP4/MOV), has a text or empty `Content-Type`, is smaller than 5 MB and is valid UTF-8.
+- Replies to POST are `ok`, or `same` when an upload without a file name is exactly what the phone already had (what it last received or sent), and was ignored. Uploads with a file name are always saved. `PUT` works like `POST`.
+- A body counts as text if it has no file name, doesn't start like a known file type (JPEG, PNG, GIF, PDF, ZIP, HEIC, MP4/MOV, RTF), has a text or empty `Content-Type`, is smaller than 5 MB and is valid UTF-8.
 - Files that arrive within 8 seconds of each other go on the clipboard together.
 - A wrong or missing token gets `403`, other paths `404`, and other methods `405`. Uploads need a `Content-Length` header.
 - The server listens on all of the PC's network adapters and answers one request at a time.
