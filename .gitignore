@@ -1,0 +1,8 @@
+# Private, machine-specific files created by ClipBridge at runtime.
+# They contain the access token and this PC's local IP addresses.
+clipbridge-token.txt
+clipbridge-url.txt
+
+# Files Windows Explorer puts in folders
+Thumbs.db
+desktop.ini

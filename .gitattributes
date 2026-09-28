@@ -1,0 +1,6 @@
+# Normalize text files in the repository, but check out the Windows scripts with CRLF line
+# endings: cmd.exe needs them for .bat files, and "Download ZIP" on GitHub keeps them too.
+* text=auto
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
