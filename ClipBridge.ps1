@@ -52,7 +52,7 @@ $MimeTypes = [ordered]@{
     '.jpg' = 'image/jpeg'; '.jpeg' = 'image/jpeg'; '.png' = 'image/png'; '.gif' = 'image/gif'
     '.heic' = 'image/heic'; '.webp' = 'image/webp'; '.pdf' = 'application/pdf'; '.txt' = 'text/plain'
     '.zip' = 'application/zip'; '.mp4' = 'video/mp4'; '.mov' = 'video/quicktime'; '.mp3' = 'audio/mpeg'
-    '.m4a' = 'audio/mp4'
+    '.m4a' = 'audio/mp4'; '.html' = 'text/html'; '.rtf' = 'text/rtf'
     '.docx' = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     '.xlsx' = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     '.pptx' = 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
@@ -76,10 +76,14 @@ $script:LastTransfer      = $null
 $script:IsFirstRun        = $false
 $script:Buffer            = New-Object byte[] 262144
 
-# For "new=1": the clipboard sequence number (it goes up on every copy) the phone is up to date with
+# The clipboard sequence number (it goes up on every copy) the phone is up to date with, for "new=1",
+# and a fingerprint of what the phone's clipboard holds: whatever it last got from or sent to the PC.
+# The most recent copy wins; these only stop old content from coming back.
 $script:PhoneSeq = 0
-# Fingerprints of recent content in either direction, so repeats from the phone are ignored
-$script:Seen = New-Object 'System.Collections.Generic.List[string]'
+$script:PhoneHash = $null
+$script:WarnedAboutNew = $false
+# Fingerprints of the last files shared with "File to PC", so they aren't sent back to the phone
+$script:SharedFiles = New-Object 'System.Collections.Generic.List[string]'
 # Files that arrive within a few seconds of each other go on the clipboard together
 $script:Batch = New-Object System.Collections.Specialized.StringCollection
 $script:LastFileAt = [datetime]::MinValue
@@ -662,6 +666,8 @@ function Get-ExtensionFromContent([string]$Path) {
     if ($got -ge 4 -and $ascii.GetString($head, 0, 4) -eq 'GIF8') { return '.gif' }
     if ($got -ge 4 -and $ascii.GetString($head, 0, 4) -eq '%PDF') { return '.pdf' }
     if ($got -ge 4 -and $head[0] -eq 0x50 -and $head[1] -eq 0x4B -and $head[2] -eq 3 -and $head[3] -eq 4) { return '.zip' }
+    if ($got -ge 4 -and $ascii.GetString($head, 0, 4) -eq 'rtfd') { return '.rtfd' }   # Apple's flat RTFD
+    if ($got -ge 5 -and $ascii.GetString($head, 0, 5) -eq '{\rtf') { return '.rtf' }
     if ($got -ge 12 -and $ascii.GetString($head, 4, 4) -eq 'ftyp') {
         $brand = $ascii.GetString($head, 8, 4)
         if ($brand -match '^(heic|heix|mif1|msf1|hevc)') { return '.heic' }
@@ -701,6 +707,69 @@ function Read-Utf8Text([string]$Path) {
     $text.TrimStart([char]0xFEFF)   # a byte order mark is not part of the text
 }
 
+function Read-RichText([string]$Path) {
+    # Formatted text copied on the iPhone (from Notes, Mail and so on) arrives as RTF, or as Apple's
+    # "flat RTFD": a small archive whose TXT.rtf entry holds the RTF, right after its length.
+    # Returns the RTF and a plain-text version of it, or $null.
+    try {
+        $bytes = [IO.File]::ReadAllBytes($Path)
+        $all = [Text.Encoding]::GetEncoding(28591).GetString($bytes)   # one character per byte
+        $start = $all.IndexOf('{\rtf')
+        if ($start -lt 0) { return $null }
+        $length = $bytes.Length - $start
+        if ($all.StartsWith('rtfd')) {
+            if ($start -lt 4) { return $null }
+            $length = [BitConverter]::ToInt32($bytes, $start - 4)
+            if ($length -le 0 -or $start + $length -gt $bytes.Length) { return $null }
+        }
+        $rtf = $all.Substring($start, $length)
+        $box = New-Object Windows.Forms.RichTextBox
+        try { $box.Rtf = $rtf; $text = $box.Text } finally { $box.Dispose() }
+        [pscustomobject]@{ Rtf = $rtf; Text = ($text -replace "`r?`n", "`r`n") }
+    } catch {
+        $null
+    }
+}
+
+function Set-ClipboardText([string]$Text) {
+    [Windows.Forms.Clipboard]::SetText($Text)
+}
+
+function Set-ClipboardRichText($Rich) {
+    # Both versions: Word or Outlook paste the formatting, plain-text apps get the plain text
+    $data = New-Object Windows.Forms.DataObject
+    $data.SetData([Windows.Forms.DataFormats]::Rtf, $Rich.Rtf)
+    $data.SetData([Windows.Forms.DataFormats]::UnicodeText, $Rich.Text)
+    [Windows.Forms.Clipboard]::SetDataObject($data, $true)
+}
+
+function Test-WebPage([string]$Text, [string]$ContentType) {
+    # A whole HTML page (not a snippet), marked as HTML or not marked at all
+    ($ContentType -eq 'text/html' -or $ContentType -eq '') -and $Text -match '^\s*<(?:!doctype\s+html|html[\s>])'
+}
+
+function Get-PageAddress([string]$Html) {
+    # When a copied link is sent as a file, Shortcuts downloads the page and sends that instead.
+    # Most pages state their own address in <link rel="canonical"> or <meta property="og:url">.
+    $head = $Html.Substring(0, [Math]::Min($Html.Length, 500000))
+    foreach ($tag in [regex]::Matches($head, '<(?:link|meta)\b[^>]*>', 'IgnoreCase')) {
+        $attribute = $null
+        if ($tag.Value -match '\brel\s*=\s*["'']?canonical\b') { $attribute = 'href' }
+        elseif ($tag.Value -match '\b(?:property|name)\s*=\s*["'']?(?:og|twitter):url\b') { $attribute = 'content' }
+        if ($attribute -and $tag.Value -match "\b$attribute\s*=\s*(?:""([^""]*)""|'([^']*)'|([^\s>]+))") {
+            $value = if ($Matches[1]) { $Matches[1] } elseif ($Matches[2]) { $Matches[2] } else { $Matches[3] }
+            $value = [Net.WebUtility]::HtmlDecode($value).Trim()
+            if ($value.StartsWith('//')) { $value = 'https:' + $value }
+            if ($value -match '^https?://\S+$') { return $value }
+        }
+    }
+    $null
+}
+
+function Get-PageTitle([string]$Html) {
+    if ($Html -match '(?is)<title[^>]*>(.*?)</title>') { ([Net.WebUtility]::HtmlDecode($Matches[1]) -replace '\s+', ' ').Trim() }
+}
+
 function Get-FileHashString([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
@@ -713,11 +782,15 @@ function Get-TextHashString([string]$Text) {
     finally { $sha.Dispose() }
 }
 
-function Add-Seen([string]$Hash) {
-    if (-not $Hash) { return }
-    [void]$script:Seen.Remove($Hash)
-    $script:Seen.Add($Hash)
-    while ($script:Seen.Count -gt 30) { $script:Seen.RemoveAt(0) }
+function Set-PhoneContent([string]$Hash) {
+    # The iPhone's clipboard just got this from the PC, or sent it to the PC
+    $script:PhoneHash = $Hash
+}
+
+function Add-SharedFile([string]$Hash) {
+    [void]$script:SharedFiles.Remove($Hash)
+    $script:SharedFiles.Add($Hash)
+    while ($script:SharedFiles.Count -gt 10) { $script:SharedFiles.RemoveAt(0) }
 }
 
 function New-ZipFromPaths([string[]]$Paths) {
@@ -813,50 +886,61 @@ function Set-ClipboardFiles([string]$Path) {
 #region Requests -------------------------------------------------------------------------------
 
 function Send-ClipboardToPhone($Stream, [bool]$OnlyIfNew) {
-    # GET /clip: files first, then a picture, then text
+    # GET /clip: copied files first, then a picture, then text
+    if (-not $OnlyIfNew -and -not $script:WarnedAboutNew) {
+        $script:WarnedAboutNew = $true
+        Write-Log ('The iPhone asked for the clipboard without "&new=1", so it gets the PC clipboard every time. ' +
+            'The PC Paste shortcut needs a URL ending in &new=1: the automations run it before Send to PC, ' +
+            'so without it, it replaces what you copied on the iPhone.') 'WARN'
+    }
     $sequence = [ClipBridge.Native]::GetClipboardSequenceNumber()
     if ($OnlyIfNew -and $sequence -eq $script:PhoneSeq) { Send-Text $Stream '200 OK' ''; return }
 
-    $done = $false
+    $path = $null; $name = $null; $text = ''; $message = $null; $temporary = $false
     if ([Windows.Forms.Clipboard]::ContainsFileDropList()) {
         $files = @([Windows.Forms.Clipboard]::GetFileDropList() | Where-Object { Test-Path -LiteralPath $_ })
         if ($files.Count -eq 1 -and (Test-Path -LiteralPath $files[0] -PathType Leaf)) {
-            $name = [IO.Path]::GetFileName($files[0])
-            Send-File $Stream $files[0] $name
-            Add-Seen (Get-FileHashString $files[0])
-            Complete-Transfer ('Sent file to iPhone: {0}' -f $name)
-            $done = $true
+            $path = $files[0]
+            $name = [IO.Path]::GetFileName($path)
+            $message = 'Sent file to iPhone: {0}' -f $name
         } elseif ($files.Count -gt 0) {
             $zip = New-ZipFromPaths $files
-            try {
-                Send-File $Stream $zip.Path $zip.Name
-                Add-Seen (Get-FileHashString $zip.Path)
-            } finally {
-                Remove-Item -LiteralPath $zip.Path -Force -ErrorAction SilentlyContinue
-            }
-            Complete-Transfer ('Sent {0} item(s) to iPhone as {1}' -f $files.Count, $zip.Name)
-            $done = $true
+            $path = $zip.Path; $name = $zip.Name; $temporary = $true
+            $message = 'Sent {0} item(s) to iPhone as {1}' -f $files.Count, $zip.Name
         }
     }
-    if (-not $done -and [Windows.Forms.Clipboard]::ContainsImage()) {
+    if (-not $path -and [Windows.Forms.Clipboard]::ContainsImage()) {
         $image = [Windows.Forms.Clipboard]::GetImage()   # can be $null even though an image is reported
         if ($image) {
-            $png = Join-Path $TempDir 'clipboard.png'
-            try { $image.Save($png, [Drawing.Imaging.ImageFormat]::Png) } finally { $image.Dispose() }
-            Send-File $Stream $png ('PC image {0:yyyy-MM-dd HHmmss}.png' -f (Get-Date))
-            Add-Seen (Get-FileHashString $png)
-            Complete-Transfer 'Sent image to iPhone'
-            $done = $true
+            $path = Join-Path $TempDir 'clipboard.png'
+            try { $image.Save($path, [Drawing.Imaging.ImageFormat]::Png) } finally { $image.Dispose() }
+            $name = 'PC image {0:yyyy-MM-dd HHmmss}.png' -f (Get-Date)
+            $message = 'Sent image to iPhone'
         }
     }
-    if (-not $done) {
+    if (-not $path) {
         $text = [Windows.Forms.Clipboard]::GetText()
         if ($null -eq $text) { $text = '' }
-        Send-Text $Stream '200 OK' $text
-        if ($text) {
-            Add-Seen (Get-TextHashString $text)
-            Complete-Transfer ('Sent text to iPhone ({0} characters)' -f $text.Length)
+        $message = 'Sent text to iPhone ({0} characters)' -f $text.Length
+    }
+    try {
+        $hash = if ($path) { Get-FileHashString $path } elseif ($text) { Get-TextHashString $text } else { $null }
+        if ($OnlyIfNew -and $hash -and ($hash -eq $script:PhoneHash -or $script:SharedFiles.Contains($hash))) {
+            # The clipboard changed, but it holds what the iPhone already has: another program (Synergy,
+            # a clipboard manager, remote desktop...) put it there again, or it's a file the iPhone just
+            # shared. Sending it now would replace whatever was copied on the iPhone since.
+            Write-Log 'Not sending the PC clipboard again: the iPhone already has it'
+            Send-Text $Stream '200 OK' ''
+        } elseif ($path) {
+            Send-File $Stream $path $name
+            Set-PhoneContent $hash
+            Complete-Transfer $message
+        } else {
+            Send-Text $Stream '200 OK' $text   # an empty reply when there is nothing we can send
+            if ($text) { Set-PhoneContent $hash; Complete-Transfer $message }
         }
+    } finally {
+        if ($temporary) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
     }
     # Only after a successful send: if anything above failed, the next "new=1" request tries again
     $script:PhoneSeq = $sequence
@@ -881,28 +965,63 @@ function Receive-FromPhone($Stream, $Request) {
         if ($Request.Headers -match '(?im)^Content-Type:\s*([^;\r\n]+)') { $contentType = $Matches[1].Trim().ToLower() }
         $detectedExtension = Get-ExtensionFromContent $tmp
 
-        # Text only if nothing says it's a file: no file name, no known file signature, a text-like
-        # content type, and valid UTF-8
-        $text = $null
+        # What arrived: formatted text, plain text, a link, or a file
+        $kind = 'file'; $text = $null; $rich = $null; $page = $null
         $textType = $contentType -eq '' -or $contentType.StartsWith('text/') -or $contentType -eq 'application/x-www-form-urlencoded'
-        if (-not $name -and -not $detectedExtension -and $textType -and $size -gt 0 -and $size -lt 5MB) {
+        if ($detectedExtension -eq '.rtfd' -or ($detectedExtension -eq '.rtf' -and -not $name)) {
+            # Formatted text (copied in Notes, Mail and so on) comes as Apple's RTFD, or as RTF
+            $rich = Read-RichText $tmp
+            if ($rich) { $kind = 'formatted text'; $text = $rich.Text }
+        } elseif (-not $name -and -not $detectedExtension -and $textType -and $size -gt 0 -and $size -lt 5MB) {
+            # Text only if nothing says it's a file: no file name, no known file signature, a text-like
+            # content type, and valid UTF-8
             $text = Read-Utf8Text $tmp
+            if ($null -ne $text) { $kind = 'text' }
+            if ($null -ne $text -and (Test-WebPage $text $contentType)) {
+                # A copied link that Shortcuts sent as a file: it downloads the page and sends that.
+                # Paste the page's own address instead of its HTML code.
+                $page = $text
+                $text = Get-PageAddress $page
+                $kind = if ($text) { 'link' } else { 'file' }
+            }
         }
 
-        # Ignore anything seen recently: the phone re-sending its clipboard, or sending back what it
-        # just got from the PC. Otherwise it would overwrite whatever you copied on the PC since.
         $hash = if ($null -ne $text) { Get-TextHashString $text } else { Get-FileHashString $tmp }
-        if ($size -eq 0 -or $script:Seen.Contains($hash)) { Send-Text $Stream '200 OK' 'same'; return }
-        Add-Seen $hash
+        if ($size -eq 0) { Send-Text $Stream '200 OK' 'same'; return }
+        if ($name) {
+            # Shared with "File to PC": always saved, even if the same file came before
+            Add-SharedFile $hash
+        } elseif ($hash -eq $script:PhoneHash) {
+            # Sent from the iPhone clipboard, but nothing new was copied there since the last transfer
+            # (the automations send it every time you leave an app). Ignoring it keeps an old copy
+            # from replacing something newer that was copied on the PC.
+            Write-Log ('Ignored {0} from iPhone: nothing new was copied there since the last transfer' -f $kind)
+            Send-Text $Stream '200 OK' 'same'
+            return
+        } else {
+            Set-PhoneContent $hash
+        }
 
         if ($null -ne $text) {
-            if ($text.Length -gt 0) { [Windows.Forms.Clipboard]::SetText($text) }
+            if ($rich) { Set-ClipboardRichText $rich } elseif ($text.Length -gt 0) { Set-ClipboardText $text }
             $script:PhoneSeq = [ClipBridge.Native]::GetClipboardSequenceNumber()   # don't send it straight back
             Send-Text $Stream '200 OK' 'ok'
-            Complete-Transfer ('Got text from iPhone ({0} characters)' -f $text.Length)
+            if ($kind -eq 'link') {
+                $uri = $null
+                $site = if ([Uri]::TryCreate($text, [UriKind]::Absolute, [ref]$uri)) { $uri.Host } else { 'a website' }
+                Complete-Transfer ('Got a link from iPhone ({0})' -f $site)
+            } else {
+                Complete-Transfer ('Got {0} from iPhone ({1} characters)' -f $kind, $text.Length)
+            }
             return
         }
 
+        if ($page) {
+            # The page doesn't state its address: save it as a web page rather than paste its code
+            $title = Get-PageTitle $page
+            $name = (Get-SafeFileName $(if ($title) { $title } else { 'Web page' })) + '.html'
+            Write-Log 'The iPhone sent a web page instead of a link, and the page doesn''t state its address, so it was saved as a file' 'WARN'
+        }
         $destination = Get-UniquePath $script:Inbox (Get-ReceivedFileName $name $detectedExtension $contentType)
         Move-Item -LiteralPath $tmp -Destination $destination
         Set-ClipboardFiles $destination
