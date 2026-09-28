@@ -44,6 +44,8 @@ ClipBridge runs a tiny web server on your PC that only answers on your home netw
 
 You'll make three Shortcuts and two automations in the **Shortcuts** app. Wherever the steps say *your URL*, use the URL from step 8 above.
 
+> **Quicker:** instead of building **Send to PC** by hand (step 2), you can [import it from iCloud](https://www.icloud.com/shortcuts/d60e439b00c34cfbb4f408b60a0641bd). After importing, open it and paste your URL into both **Get Contents of URL** actions. They're empty on purpose, so nobody's token is shared. You can rename the shortcut to **Send to PC**. iOS can't share automations, so set those up by hand (step 4).
+
 In the **Get Contents of URL** action, tap the small arrow (or **Show More**) to see the **Method**, **Headers** and **Request Body** settings.
 
 ### 1. "PC Paste": bring the PC clipboard to the iPhone
