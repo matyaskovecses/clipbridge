@@ -82,6 +82,7 @@ $script:Buffer            = New-Object byte[] 262144
 $script:PhoneSeq = 0
 $script:PhoneHash = $null
 $script:WarnedAboutNew = $false
+$script:WarnedAboutEmpty = $false
 # Fingerprints of the last files shared with "File to PC", so they aren't sent back to the phone
 $script:SharedFiles = New-Object 'System.Collections.Generic.List[string]'
 # Files that arrive within a few seconds of each other go on the clipboard together
@@ -787,6 +788,19 @@ function Set-PhoneContent([string]$Hash) {
     $script:PhoneHash = $Hash
 }
 
+function Get-ClipboardSharer {
+    # Who put the PC clipboard there, if it wasn't copied on this PC: ClipBridge itself, or a program that
+    # shares the clipboard with another computer. Such a program can bring back what the iPhone copied:
+    # Synergy with a Mac does, since the Mac gets the iPhone's clipboard through Universal Clipboard.
+    # $null means it was copied on this PC.
+    $id = [uint32]0
+    [void][ClipBridge.Native]::GetWindowThreadProcessId([ClipBridge.Native]::GetClipboardOwner(), [ref]$id)
+    if ($id -eq 0) { return $null }
+    if ($id -eq $PID) { return 'ClipBridge' }
+    $name = (Get-Process -Id $id -ErrorAction SilentlyContinue).ProcessName
+    if ($name -match 'synergy|deskflow|barrier|input-?leap|sharemouse|mousewithoutborders') { $name }
+}
+
 function Add-SharedFile([string]$Hash) {
     [void]$script:SharedFiles.Remove($Hash)
     $script:SharedFiles.Add($Hash)
@@ -925,11 +939,15 @@ function Send-ClipboardToPhone($Stream, [bool]$OnlyIfNew) {
     }
     try {
         $hash = if ($path) { Get-FileHashString $path } elseif ($text) { Get-TextHashString $text } else { $null }
-        if ($OnlyIfNew -and $hash -and ($hash -eq $script:PhoneHash -or $script:SharedFiles.Contains($hash))) {
-            # The clipboard changed, but it holds what the iPhone already has: another program (Synergy,
-            # a clipboard manager, remote desktop...) put it there again, or it's a file the iPhone just
+        # Copied again on this PC, what the iPhone had before is sent again: its clipboard may have changed
+        # since without ClipBridge knowing (Universal Clipboard, or an app without the automations). Only
+        # when ClipBridge or a program such as Synergy put it back is it old content returning.
+        $sharer = if ($OnlyIfNew -and $hash -and $hash -eq $script:PhoneHash) { Get-ClipboardSharer }
+        if ($sharer -or ($OnlyIfNew -and $hash -and $script:SharedFiles.Contains($hash))) {
+            # The clipboard changed, but it holds what the iPhone already has, or a file the iPhone just
             # shared. Sending it now would replace whatever was copied on the iPhone since.
-            Write-Log 'Not sending the PC clipboard again: the iPhone already has it'
+            $reason = if ($sharer) { '{0} put back what the iPhone already has' -f $sharer } else { 'the iPhone already has it' }
+            Write-Log ('Not sending the PC clipboard again: {0}' -f $reason)
             Send-Text $Stream '200 OK' ''
         } elseif ($path) {
             Send-File $Stream $path $name
@@ -987,7 +1005,17 @@ function Receive-FromPhone($Stream, $Request) {
         }
 
         $hash = if ($null -ne $text) { Get-TextHashString $text } else { Get-FileHashString $tmp }
-        if ($size -eq 0) { Send-Text $Stream '200 OK' 'same'; return }
+        if ($size -eq 0) {
+            if (-not $name -and -not $script:WarnedAboutEmpty) {
+                # Send to PC found the iPhone clipboard empty. PC Paste without its If step does that: it
+                # copies the empty "nothing new" replies too, and the automations run it twice per app switch.
+                $script:WarnedAboutEmpty = $true
+                Write-Log ('The iPhone sent an empty clipboard. If you didn''t empty it, PC Paste is probably missing its ' +
+                    '"If Contents of URL has any value" step: without it, every "nothing new" reply empties the iPhone clipboard.') 'WARN'
+            }
+            Send-Text $Stream '200 OK' 'same'
+            return
+        }
         if ($name) {
             # Shared with "File to PC": always saved, even if the same file came before
             Add-SharedFile $hash
@@ -1179,6 +1207,8 @@ try {
     Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.IO.Compression, System.IO.Compression.FileSystem
     Add-Type -Namespace ClipBridge -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+[DllImport("user32.dll")] public static extern IntPtr GetClipboardOwner();
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
 [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr hIcon);
 [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 '@
