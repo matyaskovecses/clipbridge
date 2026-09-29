@@ -170,6 +170,8 @@ Point at the icon to see the PC's address and the time of the last transfer. A *
 
 **What I copied on the iPhone doesn't arrive, or the PC's clipboard keeps coming back**: check that the PC Paste URL ends in `&new=1` (see the note in [step 4](#4-automations-make-it-as-automatic-as-possible)), and that the "Is Closed" automation runs **Send to PC** before **PC Paste**. **Show log** tells you when the iPhone asked without `&new=1`, and when it sent something that wasn't new.
 
+**What you copied on the PC reaches the iPhone, but it's gone when you paste**: PC Paste is missing its **If Contents of URL has any value** step (see [step 1](#1-pc-paste-bring-the-pc-clipboard-to-the-iphone)). Without it, PC Paste also copies ClipBridge's empty "nothing new" replies, and those empty the iPhone clipboard. The automations run PC Paste twice when you switch apps, so the second run wipes what the first one brought. **Show log** warns when the iPhone sends an empty clipboard.
+
 **A copied link pastes as a web page's code, or arrives as an `.html` file**: your Send to PC shortcut sends links as files, so Shortcuts downloads the page. Update it as described in [step 2](#2-send-to-pc-put-the-iphone-clipboard-on-the-pc). Until then, ClipBridge pastes the page's address whenever the page states it, and saves the page as an `.html` file when it doesn't.
 
 **The icon is a yellow warning sign**: port 8765 is used by another program, or Windows reserved it (Hyper-V and WSL sometimes do). ClipBridge retries every 15 seconds, so restarting the PC often fixes it. To use a different port, open the ClipBridge folder in Explorer, click the address bar, type `cmd` and press Enter. Then run `Install_ClipBridge.bat -Port 8766` and change `8765` to `8766` in your Shortcuts.
@@ -214,7 +216,7 @@ The token goes in the query string (`?t=TOKEN`) or in an `X-Token` header. The d
 | Request | What it does |
 |---|---|
 | `GET /clip?t=TOKEN` | Returns the PC clipboard: text as `text/plain; charset=utf-8`, a picture as PNG, one copied file as it is, or several files or a folder as a `.zip`. Files come with a `Content-Disposition` file name. An empty clipboard gives an empty reply. |
-| `GET /clip?t=TOKEN&new=1` | The same, but an empty reply if nothing was copied on the PC since the phone last received or sent something, or if the PC clipboard holds exactly what the phone already has. |
+| `GET /clip?t=TOKEN&new=1` | The same, but an empty reply if nothing was copied on the PC since the phone last received or sent something, or if a program such as Synergy put back exactly what the phone already has. Copying the same thing again on the PC sends it again. |
 | `POST /clip?t=TOKEN` | A text body (UTF-8) becomes the PC clipboard. RTF or Apple's flat RTFD becomes formatted text (RTF plus plain text). A whole HTML page (sent by Shortcuts in place of a copied link) becomes the page's address, taken from its `canonical` or `og:url` tag. Anything else, such as a picture or a PDF, is saved like `/file`. |
 | `POST /file?t=TOKEN` | The body is a file, with an optional `X-Filename: name` header (or `?name=`). It's saved to `Downloads\From iPhone` and put on the PC clipboard. |
 
